@@ -78,6 +78,21 @@ debug: ${DEBUG:-False}
 #最大页数 第一次添加 采集的页数默认5页
 max_page: ${MAX_PAGE:-5}
 
+# 自动同步（无用户消息任务时启用内置定时同步）与限流退避
+sync:
+  # 无已启用的 MessageTask 时自动创建「系统默认同步」任务
+  auto_task_enabled: ${SYNC_AUTO_TASK_ENABLED:-True}
+  # 内置任务 cron，默认每 30 分钟
+  auto_task_cron: ${SYNC_AUTO_TASK_CRON:-*/30 * * * *}
+  # 手动「更新公众号」API 的最小间隔（秒），与 apis/mps update 一致
+  manual_interval: ${SYNC_INTERVAL:-60}
+  # 定时任务每轮每个公众号拉取的页数（稳态增量）
+  pages_per_run: ${SYNC_PAGES_PER_RUN:-1}
+  # 尚无文章时每轮历史补抓页数（配合 max_page 逐步填满）
+  history_pages_per_run: ${SYNC_HISTORY_PAGES_PER_RUN:-1}
+  rate_limit_backoff_base: ${SYNC_RATE_LIMIT_BACKOFF_BASE:-300}
+  rate_limit_backoff_max: ${SYNC_RATE_LIMIT_BACKOFF_MAX:-3600}
+
 rss:
   #RSS域名地址：如https://www.xxx.com/
   base_url: ${RSS_BASE_URL:-}

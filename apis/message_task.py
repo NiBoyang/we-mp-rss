@@ -287,6 +287,8 @@ async def create_message_task(
         db.add(db_task)
         db.commit()
         db.refresh(db_task)
+        from core.default_sync_task import ensure_default_sync_task
+        ensure_default_sync_task(db)
         return success_response(data=db_task)
     except Exception as e:
         db.rollback()
@@ -340,6 +342,8 @@ async def update_message_task(
             db_task.cookies = task_data.cookies
         db.commit()
         db.refresh(db_task)
+        from core.default_sync_task import ensure_default_sync_task
+        ensure_default_sync_task(db)
         return success_response(data=db_task)
     except Exception as e:
         db.rollback()
@@ -382,6 +386,8 @@ async def delete_message_task(
         
         db.delete(db_task)
         db.commit()
+        from core.default_sync_task import ensure_default_sync_task
+        ensure_default_sync_task(db)
         return success_response(message="Message task deleted successfully")
     except Exception as e:
         db.rollback()

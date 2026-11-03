@@ -245,8 +245,12 @@ async def get_mps(
                 "mp_cover": mp.mp_cover,
                 "mp_intro": mp.mp_intro,
                 "status": mp.status,
+                "sync_time": mp.sync_time,
                 "created_at": mp.created_at.isoformat()
             } for mp in mps]
+        from core.sync_state import get_mp_sync_status
+        for item in mps_list:
+            item["sync_status"] = get_mp_sync_status(item["id"])
         return success_response({
             "list": mps_list,
             "page": {
@@ -356,7 +360,7 @@ async def update_mps(
                     message="请选择一个公众号"
                 )
         import time
-        sync_interval=cfg.get("sync_interval",60)
+        sync_interval=int(cfg.get("sync.manual_interval", cfg.get("sync_interval", 60)))
         if mp.update_time is None:
             mp.update_time=int(time.time())-sync_interval
         time_span=int(time.time())-int(mp.update_time)
