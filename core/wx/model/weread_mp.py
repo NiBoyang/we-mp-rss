@@ -3,10 +3,9 @@
 import time
 from urllib.parse import quote
 
-from bs4 import BeautifulSoup
-
 from core.log import logger
 from core.models.feed import Feed
+from core.mp_article_html import extract_article_html
 from core.print import print_info, print_warning
 from core.wx.model.weread import MpsWeread
 
@@ -106,85 +105,16 @@ def parse_mp_articles(payload: dict):
     return articles, len(groups)
 
 
-def _extract_js_single_quoted(html: str, marker: str) -> str:
-    """从页面 JS 里按转义感知方式提取单引号字符串（处理 \\x0a / \\' 等转义）。"""
-    i = html.find(marker)
-    if i < 0:
-        return ""
-    i += len(marker)
-    out = []
-    k = i
-    while k < len(html):
-        ch = html[k]
-        if ch == "\\":
-            out.append(html[k : k + 2])
-            k += 2
-            continue
-        if ch == "'":
-            break
-        out.append(ch)
-        k += 1
-    return "".join(out)
-
-
-def _js_unescape(s: str) -> str:
-    out = []
-    m = 0
-    while m < len(s):
-        c = s[m]
-        if c == "\\" and m + 1 < len(s):
-            nxt = s[m + 1]
-            if nxt == "x" and m + 3 < len(s):
-                try:
-                    out.append(chr(int(s[m + 2 : m + 4], 16)))
-                    m += 4
-                    continue
-                except ValueError:
-                    pass
-            mapping = {"n": "\n", "t": "\t", "r": "\r", "'": "'", '"': '"', "\\": "\\"}
-            out.append(mapping.get(nxt, nxt))
-            m += 2
-        else:
-            out.append(c)
-            m += 1
-    return "".join(out)
-
-
-def _extract_content_noencode(html: str) -> str:
-    """兜底：从页面分享配置 JS 变量 content_noencode 提取全文纯文本。
-
-    2026-10 实测：微信已改版文章页，匿名公开页与微信读书代理页均不再输出
-    ``<div id="js_content">``，全文改放在 JS 变量 ``content_noencode``（纯文本，
-    换行为 \\x0a）。提取后按段落转成 <p> HTML，图片类富文本元素会丢失（新页面
-    本身也不含正文 <img>，为微信侧行为而非提取缺陷）。
-    """
-    raw = _extract_js_single_quoted(html, "content_noencode: '")
-    if not raw:
-        raw = _extract_js_single_quoted(html, "content_noencode:'")
-    if not raw:
-        return ""
-    text = _js_unescape(raw).strip()
-    if not text:
-        return ""
-    paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
-    escaped = []
-    for p in paragraphs:
-        p = p.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        escaped.append(f"<p>{p}</p>")
-    return "".join(escaped)
-
-
 def extract_mp_content(html: str) -> str:
-    soup = BeautifulSoup(html or "", "html.parser")
-    content = soup.select_one("#js_content") or soup.select_one(".rich_media_content")
-    if content is None:
-        fallback = _extract_content_noencode(html or "")
-        if fallback:
-            return fallback
+    """Article body from a WeRead or WeChat HTML page.
+
+    Prefers ``#js_content``. When that node is missing, falls back to the
+    ``content_noencode`` JS variable used by the 2026 article page.
+    """
+    body = extract_article_html(html)
+    if not body:
         raise WereadMPAPIError("invalid_content", "article body was not found")
-    for element in content.select("script, style"):
-        element.decompose()
-    return content.decode_contents().strip()
+    return body
 
 
 class MpsWereadMP(MpsWeread):

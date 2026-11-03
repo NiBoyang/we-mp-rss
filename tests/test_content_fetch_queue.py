@@ -215,28 +215,185 @@ class ContentFetchQueueTest(unittest.TestCase):
           <div id="js_content"><p>article body</p></div>
         </body></html>
         """
-        with patch(
-            "core.wx.model.api.MpsApi.content_extract",
-            return_value=response_html,
+        with (
+            patch.object(
+                article_content,
+                "_download_article_html",
+                return_value=(response_html, ""),
+            ),
+            patch(
+                "driver.wxarticle.Web.clean_article_content",
+                side_effect=lambda html, mp_id="": html,
+            ),
         ):
             content, metadata = article_content._fetch_with_api(
-                "https://example.com/article"
+                "https://mp.weixin.qq.com/s/article"
             )
 
         self.assertIn("article body", content)
         self.assertNotIn("page chrome", content)
-        self.assertEqual(metadata, {})
+        self.assertEqual(metadata.get("fetch_error"), "")
 
     def test_api_fetch_rejects_page_without_article_container(self):
-        with patch(
-            "core.wx.model.api.MpsApi.content_extract",
-            return_value="<html><body>未知错误，请稍后再试</body></html>",
+        with patch.object(
+            article_content,
+            "_download_article_html",
+            return_value=("<html><body>未知错误，请稍后再试</body></html>", ""),
         ):
-            content, _ = article_content._fetch_with_api(
-                "https://example.com/article"
+            content, meta = article_content._fetch_with_api(
+                "https://mp.weixin.qq.com/s/article"
             )
 
         self.assertEqual(content, "")
+        self.assertEqual(meta.get("fetch_error"), "unknown_error")
+
+    def test_build_article_url_rewrites_weread_tilde_token(self):
+        article = SimpleNamespace(
+            url="https://mp.weixin.qq.com/s/UqAm-SLB3q4PwtKEGVia~Q?scene=1",
+            id="ignored",
+            mp_id="MP_WXS_1",
+        )
+        self.assertEqual(
+            article_content.build_article_url(article),
+            "https://mp.weixin.qq.com/s/UqAm-SLB3q4PwtKEGVia_Q?scene=1",
+        )
+        plain = SimpleNamespace(
+            url="https://example.com/s/keep~tilde",
+            id="x",
+            mp_id="",
+        )
+        self.assertEqual(article_content.build_article_url(plain), plain.url)
+
+    def test_parameter_error_page_has_no_body(self):
+        html = '<html><div class="weui-msg__title warn">参数错误</div></html>'
+        content, reason = article_content.parse_wechat_article_page(html)
+        self.assertEqual(content, "")
+        self.assertEqual(reason, "parameter_error")
+
+    def test_content_noencode_is_accepted_as_article_body(self):
+        html = "<html><script>content_noencode: '第一段\\x0a第二段';</script></html>"
+        content, reason = article_content.parse_wechat_article_page(html)
+        self.assertEqual(reason, "")
+        self.assertIn("<p>第一段</p>", content)
+        self.assertIn("<p>第二段</p>", content)
+
+    def test_web_mode_uses_public_html_before_browser(self):
+        html = '<html><div id="js_content"><p>real article body</p></div></html>'
+        with (
+            patch.object(
+                article_content,
+                "_download_article_html",
+                return_value=(html, ""),
+            ),
+            patch(
+                "driver.wxarticle.Web.clean_article_content",
+                side_effect=lambda html, mp_id="": html,
+            ),
+            patch("driver.wxarticle.Web.get_article_content") as browser,
+        ):
+            content, mode, _ = article_content._fetch_article_content_unbounded(
+                "https://mp.weixin.qq.com/s/UqAm-SLB3q4PwtKEGVia~Q",
+                preferred_mode="web",
+                allow_fallback=True,
+            )
+
+        self.assertIn("real article body", content)
+        self.assertEqual(mode, "http")
+        browser.assert_not_called()
+
+    def test_parameter_error_does_not_launch_browser(self):
+        html = '<html><div class="weui-msg__title warn">参数错误</div></html>'
+        with (
+            patch.object(
+                article_content,
+                "_download_article_html",
+                return_value=(html, ""),
+            ) as download,
+            patch("driver.wxarticle.Web.get_article_content") as browser,
+        ):
+            content, mode, detail = article_content._fetch_article_content_unbounded(
+                "https://mp.weixin.qq.com/s/UqAm-SLB3q4PwtKEGVia~Q",
+                preferred_mode="web",
+                allow_fallback=True,
+            )
+
+        self.assertEqual(content, "")
+        self.assertEqual(mode, "web")
+        self.assertEqual(detail, "parameter_error")
+        browser.assert_not_called()
+        self.assertEqual(download.call_count, 1)
+
+    def test_http_error_falls_back_to_browser(self):
+        with (
+            patch.object(
+                article_content,
+                "_download_article_html",
+                return_value=("", "http_error:Timeout"),
+            ),
+            patch(
+                "driver.wxarticle.Web.get_article_content",
+                return_value={
+                    "content": "<p>from browser</p>",
+                    "article_type": 0,
+                    "fetch_error": "",
+                },
+            ) as browser,
+        ):
+            content, mode, _ = article_content._fetch_article_content_unbounded(
+                "https://mp.weixin.qq.com/s/abc_def",
+                preferred_mode="web",
+                allow_fallback=False,
+            )
+
+        self.assertEqual(content, "<p>from browser</p>")
+        self.assertEqual(mode, "web")
+        browser.assert_called_once()
+
+    def test_sync_persists_normalized_tilde_url(self):
+        article = self.add_article(
+            "tilde",
+            url="https://mp.weixin.qq.com/s/UqAm-SLB3q4PwtKEGVia~Q",
+            status=DATA_STATUS.FETCHING,
+            fetch_started_at=123_000,
+        )
+        with (
+            patch.object(
+                article_content,
+                "fetch_article_content",
+                return_value=("<p>body text</p>", "http", ""),
+            ),
+            patch("tools.fix.fix_html", side_effect=lambda html: html),
+            patch("driver.wxarticle.Web.get_description", return_value="body text"),
+        ):
+            updated, mode = article_content.sync_article_content(self.session, article)
+
+        self.assertTrue(updated)
+        self.assertEqual(mode, "http")
+        self.assertEqual(
+            article.url,
+            "https://mp.weixin.qq.com/s/UqAm-SLB3q4PwtKEGVia_Q",
+        )
+        self.assertEqual(article.has_content, 1)
+        self.assertEqual(article.content, "<p>body text</p>")
+
+    def test_repair_tilde_url_requeues_failed_article(self):
+        self.add_article(
+            "bad-url",
+            url="https://mp.weixin.qq.com/s/UqAm-SLB3q4PwtKEGVia~Q",
+            status=DATA_STATUS.FAILED,
+            fix_fail_count=3,
+            has_content=0,
+        )
+        repaired = fetch_no_article.repair_weread_tilde_urls(self.session)
+        article = self.session.get(Article, "bad-url")
+        self.assertEqual(repaired, 1)
+        self.assertEqual(
+            article.url,
+            "https://mp.weixin.qq.com/s/UqAm-SLB3q4PwtKEGVia_Q",
+        )
+        self.assertEqual(article.status, DATA_STATUS.ACTIVE)
+        self.assertEqual(article.fix_fail_count, 0)
+        self.assertEqual(article.has_content, 0)
 
     def test_unusable_web_result_falls_back_to_api(self):
         with (
@@ -300,6 +457,33 @@ class ContentFetchQueueTest(unittest.TestCase):
             fetch_no_article.fetch_articles_without_content()
 
         self.assertEqual(processed_ids, ["first", "second"])
+
+
+class RssContentEncodedTest(unittest.TestCase):
+    def test_missing_content_still_emits_encoded_element(self):
+        from core.rss import RSS
+
+        rss = RSS(name="unit-rss", cache_dir="/tmp/werss-rss-unit")
+
+        def rss_config(key, default=None):
+            if key == "rss.full_context":
+                return True
+            if key in {"rss.cdata", "rss.add_cover"}:
+                return False
+            return default
+
+        item = {
+            "id": "1",
+            "title": "title",
+            "description": "description",
+            "link": "https://mp.weixin.qq.com/s/token",
+            "updated": "2026-11-03T10:00:00",
+        }
+        with patch.object(cfg, "get", side_effect=rss_config):
+            xml = rss.generate_rss([item], title="feed")
+
+        self.assertIn("<content:encoded></content:encoded>", xml)
+        self.assertNotIn("Error adding content:encoded", xml)
 
 
 if __name__ == "__main__":

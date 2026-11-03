@@ -148,6 +148,10 @@ gather:
   #自动检查未采集文章内容的时间间隔 单位秒默认59分钟 允许值 1-59分钟之间 默认59分钟
   content_auto_interval: ${GATHER.CONTENT_AUTO_INTERVAL:-59}
   #内容修正模式，默认web 允许值 web、api
+  # web 会先请求公开文章页，正文可用时不再启动浏览器。
+  # 微信读书短链若把 '_' 写成 '~'，抓取时会自动改回 '_'。
+  # '~' 链接只会打开「参数错误」页（没有 og:title，也没有正文）。
+  # 公开文章不需要上传微信 Cookie。若页面是「当前环境异常」，再启用 proxy.http_url。
   content_mode: ${GATHER.CONTENT_MODE:-web}
   #单篇正文抓取总超时（秒），超时会终止浏览器进程并释放文章锁
   content_fetch_timeout: ${GATHER.CONTENT_FETCH_TIMEOUT:-60}

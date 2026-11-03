@@ -37,6 +37,22 @@ class WXArticleFetcher:
         if self.controller:
             await self.controller.Close()
 
+    async def _optional_attr(self, page, selector: str, timeout: int = 3000) -> str:
+        """Read a meta content attribute. A missing tag is not a page failure."""
+        try:
+            value = await page.locator(selector).first.get_attribute("content", timeout=timeout)
+            return value or ""
+        except Exception:
+            return ""
+
+    async def _optional_inner_html(self, page, selector: str, timeout: int = 5000) -> str:
+        """Read inner HTML. A missing node returns an empty string."""
+        try:
+            value = await page.locator(selector).first.inner_html(timeout=timeout)
+            return value or ""
+        except Exception:
+            return ""
+
     async def get_article_content(self, url: str) -> Dict:
         """
         获取文章内容(异步)
@@ -58,6 +74,9 @@ class WXArticleFetcher:
             - article_type: 文章类型 (0=图文, 5=视频, 7=音频, 10=贴图)
             - fetch_error: 错误信息
         """
+        from core.mp_article_html import normalize_mp_article_url
+
+        url = normalize_mp_article_url(url) or url
         info = {
             "id": self.extract_id_from_url(url),
             "title": "",
@@ -128,14 +147,32 @@ class WXArticleFetcher:
                     info["fetch_error"] = "发送失败无法查看"
                     return info
 
-                # 获取文章基本信息
-                title = await page.locator('meta[property="og:title"]').get_attribute("content")
-                author = await page.locator('meta[property="og:article:author"]').get_attribute("content")
-                description = await page.locator('meta[property="og:description"]').get_attribute("content")
-                topic_image = await page.locator('meta[property="twitter:image"]').get_attribute("content")
+                # A "~" short link returns this shell. It has no og:title, so waiting
+                # on that meta tag burns the default 30s locator timeout.
+                if (
+                    "参数错误" in (body_text or "")
+                    and 'id="js_content"' not in body
+                    and "content_noencode" not in body
+                ):
+                    info["fetch_error"] = "parameter_error"
+                    print_error("获取文章内容失败: 微信返回参数错误（短链 token 中的 ~ 需改为 _）")
+                    return info
+
+                # 获取文章基本信息。缺 meta 时继续解析正文，不能让 og:title 超时中断抓取。
+                title = await self._optional_attr(page, 'meta[property="og:title"]')
+                author = await self._optional_attr(page, 'meta[property="og:article:author"]')
+                description = await self._optional_attr(page, 'meta[property="og:description"]')
+                topic_image = await self._optional_attr(page, 'meta[property="twitter:image"]')
 
                 if not title:
-                    title = await page.evaluate('() => document.title')
+                    try:
+                        title = await page.evaluate('() => document.title') or ""
+                    except Exception:
+                        title = ""
+                if not title:
+                    from core.mp_article_html import meta_content
+
+                    title = meta_content(body, "og:title")
 
                 # 获取发布时间
                 publish_time = await self._extract_publish_time(page)
@@ -145,22 +182,39 @@ class WXArticleFetcher:
                 info["article_type"] = article_type
 
                 # 获取内容
-                content = await page.locator('#js_content').inner_html()
+                content = await self._optional_inner_html(page, "#js_content")
                 if not content:
-                    content = await page.locator('#js_article').inner_html()
+                    content = await self._optional_inner_html(page, "#js_article")
 
-                # 模拟滚动页面到底部，触发懒加载图片
-                try:
-                    await self._scroll_to_bottom_and_load_images(page)
-                except Exception as e:
-                    print_warning(f"滚动加载图片失败: {e}")
+                if content:
+                    # 模拟滚动页面到底部，触发懒加载图片
+                    try:
+                        await self._scroll_to_bottom_and_load_images(page)
+                    except Exception as e:
+                        print_warning(f"滚动加载图片失败: {e}")
 
-                # 重新获取内容（滚动后可能有更多图片加载）
-                content = await page.locator('#js_content').inner_html()
+                    scrolled = await self._optional_inner_html(page, "#js_content")
+                    if not scrolled:
+                        scrolled = await self._optional_inner_html(page, "#js_article")
+                    if scrolled:
+                        content = scrolled
+
                 if not content:
-                    content = await page.locator('#js_article').inner_html()
+                    from core.article_content import parse_wechat_article_page
 
-                content=Web.clean_article_content(str(content))
+                    parsed, reason = parse_wechat_article_page(body)
+                    if parsed == "DELETED":
+                        info["content"] = "DELETED"
+                        info["fetch_error"] = reason or "deleted"
+                        return info
+                    content = parsed
+                    if not content and reason:
+                        info["fetch_error"] = reason
+
+                if content:
+                    content = Web.clean_article_content(str(content))
+                elif not info["fetch_error"]:
+                    info["fetch_error"] = "no_article_body"
                 # 更新基本信息
                 info["title"] = title or ""
                 info["author"] = author or ""

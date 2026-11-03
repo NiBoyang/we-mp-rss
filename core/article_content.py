@@ -4,12 +4,16 @@ from typing import Any, Tuple
 
 from core.config import cfg
 from core.models.base import DATA_STATUS
+from core.mp_article_html import extract_article_html, normalize_mp_article_url
 from core.print import print_info, print_warning
 from core.process_timeout import (
     ProcessExecutionError,
     ProcessExecutionTimeout,
     run_in_process,
 )
+
+# Pages that will not gain a body by switching between HTTP and a browser.
+_TERMINAL_FETCH_ERRORS = {"parameter_error", "deleted"}
 
 
 def normalize_content_mode(mode: str | None = None) -> str:
@@ -35,7 +39,7 @@ def extract_origin_article_id(article_id: str, mp_id: str | None = None) -> str:
 def build_article_url(article: Any) -> str:
     article_url = (getattr(article, "url", "") or "").strip()
     if article_url:
-        return article_url
+        return normalize_mp_article_url(article_url)
 
     origin_id = extract_origin_article_id(
         getattr(article, "id", ""),
@@ -44,7 +48,110 @@ def build_article_url(article: Any) -> str:
     if not origin_id:
         return ""
 
-    return f"https://mp.weixin.qq.com/s/{origin_id}"
+    return normalize_mp_article_url(f"https://mp.weixin.qq.com/s/{origin_id}")
+
+
+def parse_wechat_article_page(html: str) -> Tuple[str, str]:
+    """Return ``(body_html, error_code)``.
+
+    ``error_code`` is empty when ``body_html`` is usable. ``DELETED`` is
+    returned as the body for author-deleted pages.
+    """
+    raw = html or ""
+    if not raw.strip():
+        return "", "empty_html"
+
+    has_body_marker = (
+        'id="js_content"' in raw
+        or "id='js_content'" in raw
+        or "rich_media_content" in raw
+        or "content_noencode" in raw
+    )
+    deleted_markers = (
+        "该内容已被发布者删除",
+        "The content has been deleted by the author.",
+        "违规无法查看",
+        "该内容暂时无法查看",
+        "发送失败无法查看",
+        "内容审核中",
+    )
+    if any(marker in raw for marker in deleted_markers) and not has_body_marker:
+        return "DELETED", "deleted"
+    if (
+        "当前环境异常" in raw
+        and "完成验证后即可继续访问" in raw
+        and not has_body_marker
+    ):
+        return "", "env_verify"
+    if "参数错误" in raw and not has_body_marker:
+        return "", "parameter_error"
+    if "你暂无权限查看此页面内容" in raw and not has_body_marker:
+        return "", "no_permission"
+    if "未知错误，请稍后再试" in raw and not has_body_marker:
+        return "", "unknown_error"
+
+    body = extract_article_html(raw)
+    if body == "DELETED":
+        return "DELETED", "deleted"
+    if not is_usable_article_content(body):
+        return "", "no_article_body"
+    return body, ""
+
+
+def _download_article_html(url: str) -> Tuple[str, str]:
+    """GET a public article page. Returns ``(html, error_code)``."""
+    import requests
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Referer": "https://mp.weixin.qq.com/",
+    }
+    proxies = None
+    target = url
+    if cfg.get("proxy.enabled", False):
+        http_proxy = (cfg.get("proxy.http_url", "") or "").strip()
+        deno_proxy = (cfg.get("proxy.deno_url", "") or "").strip()
+        if deno_proxy:
+            from urllib.parse import quote
+
+            target = f"{deno_proxy}?url={quote(url, safe='')}"
+        elif http_proxy:
+            proxies = {"http": http_proxy, "https": http_proxy}
+
+    try:
+        response = requests.get(target, headers=headers, proxies=proxies, timeout=(10, 45))
+    except requests.RequestException as exc:
+        return "", f"http_error:{exc.__class__.__name__}"
+    if response.status_code != 200:
+        return "", f"http_{response.status_code}"
+    return response.text or "", ""
+
+
+def _fetch_public_article(url: str) -> Tuple[str, dict]:
+    """Fast path: download the public page and parse the article body."""
+    url = normalize_mp_article_url(url)
+    html, error = _download_article_html(url)
+    meta = {"url": url, "fetch_error": error, "article_type": "", "source": "http"}
+    if error or not (html or "").strip():
+        if not error:
+            meta["fetch_error"] = "empty_html"
+        return "", meta
+
+    content, reason = parse_wechat_article_page(html)
+    if content and content != "DELETED":
+        try:
+            from driver.wxarticle import Web
+
+            content = (Web.clean_article_content(content) or content).strip()
+        except Exception as exc:
+            print_warning(f"clean public article html failed: {exc}")
+    meta["fetch_error"] = "" if content else (reason or "no_article_body")
+    return content, meta
 
 
 def is_usable_article_content(content: str | None) -> bool:
@@ -78,26 +185,33 @@ def is_usable_article_content(content: str | None) -> bool:
 def _fetch_with_web(url: str) -> Tuple[str, Any]:
     from driver.wxarticle import Web
 
+    url = normalize_mp_article_url(url)
+    content, meta = _fetch_public_article(url)
+    if content == "DELETED" or is_usable_article_content(content):
+        return content, meta
+
+    fetch_error = str((meta or {}).get("fetch_error") or "")
+    if fetch_error in _TERMINAL_FETCH_ERRORS:
+        print_warning(f"skip browser fetch: {fetch_error} url={url}")
+        return "", meta
+
     result = Web.get_article_content(url) or {}
-    return (result.get("content") or "").strip(),result
+    browser_content = (result.get("content") or "").strip()
+    if not browser_content and not result.get("fetch_error") and fetch_error:
+        result["fetch_error"] = fetch_error
+    return browser_content, result
 
 
 def _fetch_with_api(url: str) -> Tuple[str, Any]:
-    from core.wx.model.api import MpsApi
-
-    fetcher = MpsApi()
-    response_html = (fetcher.content_extract(url) or "").strip()
-    if not response_html or response_html == "DELETED":
-        return response_html, {}
-
-    from bs4 import BeautifulSoup
-
-    soup = BeautifulSoup(response_html, "html.parser")
-    article_body = soup.select_one("#js_content") or soup.select_one("#js_article")
-    if article_body is None:
+    content, meta = _fetch_public_article(url)
+    if content:
+        return content, meta
+    reason = str((meta or {}).get("fetch_error") or "no_article_body")
+    if reason == "no_article_body":
         print_warning("api response does not contain an article body")
-        return "", {}
-    return str(article_body), {}
+    else:
+        print_warning(f"api article fetch failed: {reason}")
+    return content, meta
 
 
 def _fetch_article_content_unbounded(
@@ -112,27 +226,36 @@ def _fetch_article_content_unbounded(
 
     article_type = ""
     last_mode = mode
+    last_detail = ""
 
     for current_mode in modes:
         last_mode = current_mode
         try:
             if current_mode == "api":
-                content,result = _fetch_with_api(url)
+                content, result = _fetch_with_api(normalize_mp_article_url(url))
             else:
-                content,result = _fetch_with_web(url)
-            article_type = result.get("article_type", "")
+                content, result = _fetch_with_web(url)
+            article_type = str((result or {}).get("article_type") or "")
         except Exception as exc:
             print_warning(f"fetch article content failed in {current_mode} mode: {exc}")
+            last_detail = f"{current_mode}:{exc.__class__.__name__}"
             continue
 
-        if content == "DELETED":
-            return content, current_mode,article_type
+        fetch_error = str((result or {}).get("fetch_error") or "")
+        if fetch_error:
+            last_detail = fetch_error
+        if content == "DELETED" or fetch_error == "deleted":
+            return "DELETED", current_mode, "deleted"
         if is_usable_article_content(content):
-            return content, current_mode,article_type
+            source = str((result or {}).get("source") or "")
+            used_mode = "http" if source == "http" else current_mode
+            return content, used_mode, article_type
         if content:
             print_warning(f"ignoring unusable article content from {current_mode} mode")
+        if fetch_error in _TERMINAL_FETCH_ERRORS:
+            break
 
-    return "", last_mode, article_type
+    return "", last_mode, last_detail or "empty body"
 
 
 def fetch_article_content(
@@ -194,6 +317,13 @@ def sync_article_content(
         return False, "cached"
 
     article_url = build_article_url(article)
+    stored_url = (getattr(article, "url", "") or "").strip()
+    if article_url and stored_url and article_url != stored_url:
+        print_warning(
+            f"article {getattr(article, 'id', '')} url normalized: {stored_url} -> {article_url}"
+        )
+        article.url = article_url
+        session.commit()
     if not article_url:
         print_warning(f"article {getattr(article, 'id', '')} has no valid url")
         mark_article_fetch_failed(session, article, "missing_url")
@@ -213,7 +343,8 @@ def sync_article_content(
         return False, "error"
 
     if not content:
-        mark_article_fetch_failed(session, article, f"empty response via {mode}")
+        detail = article_type or "empty body"
+        mark_article_fetch_failed(session, article, f"empty response via {mode}: {detail}")
         return False, mode
 
     try:
