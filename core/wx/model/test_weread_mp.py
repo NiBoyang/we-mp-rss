@@ -78,6 +78,14 @@ class WereadMpParsingTest(unittest.TestCase):
 
         self.assertEqual(extract_mp_content(html), '<p>Hello</p>')
 
+    def test_extract_mp_content_reads_plain_text_content_noencode(self):
+        html = "<html><script>content_noencode: 'hello\\x0aworld';</script></html>"
+        self.assertEqual(extract_mp_content(html), "<p>hello</p><p>world</p>")
+
+    def test_extract_mp_content_reads_html_content_noencode(self):
+        html = "<html><script>content_noencode: '\\x3cp\\x3eHi\\x3c/p\\x3e';</script></html>"
+        self.assertIn("<p>Hi</p>", extract_mp_content(html))
+
     def test_build_mp_url_rejects_missing_original_id(self):
         self.assertEqual(build_mp_url(""), "")
 

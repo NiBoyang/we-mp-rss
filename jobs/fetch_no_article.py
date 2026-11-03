@@ -5,9 +5,11 @@ from core.wait import Wait
 from core.print import print_success,print_error,print_warning
 from core.article_content import (
     build_article_url,
+    is_usable_article_content,
     mark_article_fetch_failed,
     sync_article_content,
 )
+from core.mp_article_html import normalize_mp_article_url
 DB=db.Db(tag="内容修正")
 
 
@@ -87,6 +89,37 @@ def claim_next_article(session, excluded_ids=None, now_millis: int = None):
         session.expire_all()
 
 
+def repair_weread_tilde_urls(session) -> int:
+    """Rewrite WeRead ``~`` short links and reopen fetches that died on them.
+
+    ``~`` is not a valid WeChat token character. Those URLs return a
+    ``参数错误`` page, so Playwright waits forever for ``og:title`` and the API
+    parser finds no article body. Correcting the token lets the next claim
+    download the real article.
+    """
+    rows = session.query(Article).filter(
+        Article.url.contains("mp.weixin.qq.com/s/"),
+        Article.url.contains("~"),
+    ).all()
+    repaired = 0
+    for article in rows:
+        fixed = normalize_mp_article_url(article.url or "")
+        if not fixed or fixed == (article.url or ""):
+            continue
+        had_body = is_usable_article_content(getattr(article, "content", ""))
+        article.url = fixed
+        if article.status != DATA_STATUS.FETCHING and not had_body:
+            article.fix_fail_count = 0
+            article.has_content = 0
+            if article.status == DATA_STATUS.FAILED:
+                article.status = DATA_STATUS.ACTIVE
+        repaired += 1
+    if repaired:
+        session.commit()
+        print_warning(f"已修正 {repaired} 条微信短链（~ → _），无正文的文章会重新抓取")
+    return repaired
+
+
 def fetch_articles_without_content():
     """
     查询content为空的文章，调用微信内容提取方法获取内容并更新数据库
@@ -94,6 +127,7 @@ def fetch_articles_without_content():
     """
     session = DB.get_session()
     try:
+        repair_weread_tilde_urls(session)
         recover_stale_fetching_articles(session)
         batch_size = int(cfg.get("gather.content_batch_size", 5) or 5)
         processed_ids = set()

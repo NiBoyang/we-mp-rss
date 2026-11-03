@@ -28,7 +28,7 @@ class RSS:
     
     def cache_content(self, content_id: str, content: dict):
         """缓存文章内容"""
-        content["content"]=self.add_logo_prefix_to_urls(content["content"])
+        content["content"]=self.add_logo_prefix_to_urls(content.get("content") or "")
         content_path = os.path.normpath(f"{self.content_cache_dir}/{content_id}.json")
         if not content_path.startswith(self.content_cache_dir):
             raise ValueError("Invalid content path: Path traversal detected.")
@@ -138,14 +138,13 @@ class RSS:
                 enclosure.set("type", "image/jpeg")
             if full_context==True:
                 try:
+                    content = str(rss_item.get("content") or "")
                     if cfg.get("rss.cdata",False)==True:
-                        content = f"<![CDATA[{str(rss_item['content'])}]]>"  # 使用CDATA包裹内容
-                    else:
-                        content = str(rss_item['content'])
+                        content = f"<![CDATA[{content}]]>"  # 使用CDATA包裹内容
                     ET.SubElement(item, "content:encoded").text = content
                 except Exception as e:
                     print(f"Error adding content:encoded element: {e}")
-                pass
+                    ET.SubElement(item, "content:encoded").text = ""
             # ET.SubElement(item, "category").text = rss_item["category"]
             # ET.SubElement(item, "author").text = rss_item["author"]
             ET.SubElement(item, "link").text = rss_item["link"]
@@ -216,15 +215,14 @@ class RSS:
                 type=self.get_content_type()
                 # content = ET.SubElement(entry, "content", type=f"{str(type)}") 
                 # content.text = format_content(rss_item["content"],type)
-                content=format_content(rss_item["content"],type)
+                content=format_content(rss_item.get("content") or "",type)
                 try:
                     if cfg.get("rss.cdata",False)==True:
                         content = f"<![CDATA[{content}]]>"  # 使用CDATA包裹内容
-                    else:
-                        ET.SubElement(entry, "content:encoded").text = content
+                    ET.SubElement(entry, "content:encoded").text = content
                 except Exception as e:
                     print(f"Error adding content:encoded element: {e}")
-                pass
+                    ET.SubElement(entry, "content:encoded").text = ""
         # 生成XML字符串
         tree_str = '<?xml version="1.0" encoding="utf-8"?>\r\n' + \
                   ET.tostring(feed, encoding="utf-8", method="xml").decode("utf-8")
@@ -269,7 +267,7 @@ class RSS:
                     "description": item["description"],
                     "link": item["link"],
                     "updated": item["updated"].isoformat() if isinstance(item["updated"], datetime) else item["updated"],
-                    "content": format_content(item["content"],type),
+                    "content": format_content(item.get("content") or "",type),
                     "channel_name": item.get("mp_name", ""),
                     "feed": item.get("feed")
                 } for item in rss_list
