@@ -41,6 +41,7 @@ USER_AGENTS = [
 class WxGather:
     articles=[]
     aids=[]
+    rate_limited = False
     def all_count(self):
         if getattr(self, 'articles', None) is not None:
             return len(self.articles)
@@ -350,6 +351,9 @@ class WxGather:
         self.Wait(tips=f"{item['mps_title']} 处理完成",min=3,max=10) #type: ignore
         pass
     def Error(self,error:str,code=None):
+        err_lower = (error or "").lower()
+        if "frequencey control" in err_lower or "frequency control" in err_lower:
+            self.rate_limited = True
         self.Over()
         if code=="Invalid Session":
             # from core.queue import TaskQueue

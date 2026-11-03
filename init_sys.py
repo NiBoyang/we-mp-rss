@@ -56,6 +56,8 @@ def sync_models():
 def init():
     sync_models()
     init_user(DB)
+    from core.default_sync_task import ensure_default_sync_task
+    ensure_default_sync_task()
 
 if __name__ == '__main__':
     init()

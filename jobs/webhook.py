@@ -48,6 +48,9 @@ def send_message(hook: MessageWebHook) -> str:
     message = parser.render(data)
     # 这里可以添加发送消息的具体实现
     print("发送消息:", message)
+    if not str(hook.task.web_hook_url or "").strip():
+        logger.info("未配置 webhook_url，跳过通知发送")
+        return message
     try:
         notice(hook.task.web_hook_url, hook.task.name, message)
     except Exception as e:

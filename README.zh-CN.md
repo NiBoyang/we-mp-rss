@@ -369,8 +369,9 @@ DELETE /api/filter-rules/{rule_id}
 
 - **如何开启定时任务？**
   1、修改 `config.yaml` 中的 `ENABLE_JOB` 或通过环境变量 `ENABLE_JOB` 设置 为True。
-  2、在UI界面的消息任务中，添加定时任务。
-  
+  2、（推荐）无需手动建任务：当没有任何已启用的 MessageTask 时，系统会自动创建「系统默认同步」并按 `sync.auto_task_cron`（默认每 30 分钟）采集全部公众号；可在「消息任务」里看到并修改该任务。
+  3、若你自行添加了消息任务，内置默认任务会自动停用，避免重复采集。
+  4、微信限流时会在公众号列表的 `sync_status` 中显示等待重试时间，并按 `sync.rate_limit_backoff_*` 自动退避重试。
 - **如何修改文章内容发送格式？**
   修改 `config.yaml` 中的 `WEBHOOK.CONTENT_FORMAT` 或通过环境变量 `WEBHOOK.CONTENT_FORMAT` 设置。
 
